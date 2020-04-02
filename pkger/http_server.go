@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -49,6 +50,7 @@ func NewHTTPServer(log *zap.Logger, svc SVC) *HTTPServer {
 			Post("/", svr.createPkg)
 		r.With(middleware.SetHeader("Content-Type", "application/json; charset=utf-8")).
 			Post("/apply", svr.applyPkg)
+		r.Post("/stacks", svr.createStack)
 	}
 
 	svr.Router = r
@@ -60,16 +62,122 @@ func (s *HTTPServer) Prefix() string {
 	return RoutePrefix
 }
 
-type (
-	// ReqCreatePkg is a request body for the create pkg endpoint.
-	ReqCreatePkg struct {
-		OrgIDs    []string          `json:"orgIDs"`
-		Resources []ResourceToClone `json:"resources"`
+// ReqCreateStack is a request body for a create stack call.
+type ReqCreateStack struct {
+	OrgID       string   `json:"orgID"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	URLs        []string `json:"urls"`
+}
+
+// OK validates the request body is valid.
+func (r *ReqCreateStack) OK() error {
+	// TODO: provide multiple errors back for failing validation
+	if _, err := influxdb.IDFromString(r.OrgID); err != nil {
+		return &influxdb.Error{
+			Code: influxdb.EInvalid,
+			Msg:  fmt.Sprintf("provided org id[%q] is invalid", r.OrgID),
+		}
 	}
 
-	// RespCreatePkg is a response body for the create pkg endpoint.
-	RespCreatePkg []Object
-)
+	for _, u := range r.URLs {
+		if _, err := url.Parse(u); err != nil {
+			return &influxdb.Error{
+				Code: influxdb.EInvalid,
+				Msg:  fmt.Sprintf("provided url[%q] is invalid", u),
+			}
+		}
+	}
+	return nil
+}
+
+func (r *ReqCreateStack) orgID() influxdb.ID {
+	orgID, _ := influxdb.IDFromString(r.OrgID)
+	return *orgID
+}
+
+// RespCreateStack is the response body for the create stack call.
+type RespCreateStack struct {
+	ID          string   `json:"id"`
+	OrgID       string   `json:"orgID"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	URLs        []string `json:"urls"`
+	influxdb.CRUDLog
+}
+
+func (s *HTTPServer) createStack(w http.ResponseWriter, r *http.Request) {
+	var reqBody ReqCreateStack
+	if err := s.api.DecodeJSON(r.Body, &reqBody); err != nil {
+		s.api.Err(w, err)
+		return
+	}
+	defer r.Body.Close()
+
+	auth, err := pctx.GetAuthorizer(r.Context())
+	if err != nil {
+		s.api.Err(w, err)
+		return
+	}
+
+	stack, err := s.svc.InitStack(r.Context(), auth.GetUserID(), Stack{
+		OrgID:       reqBody.orgID(),
+		Name:        reqBody.Name,
+		Description: reqBody.Description,
+		URLs:        reqBody.URLs,
+	})
+	if err != nil {
+		s.api.Err(w, err)
+		return
+	}
+
+	s.api.Respond(w, http.StatusCreated, RespCreateStack{
+		ID:          stack.ID.String(),
+		OrgID:       stack.OrgID.String(),
+		Name:        stack.Name,
+		Description: stack.Description,
+		URLs:        stack.URLs,
+		CRUDLog:     stack.CRUDLog,
+	})
+}
+
+// ReqCreateOrgIDOpt provides options to export resources by organization id.
+type ReqCreateOrgIDOpt struct {
+	OrgID   string `json:"orgID"`
+	Filters struct {
+		ByLabel        []string `json:"byLabel"`
+		ByResourceKind []Kind   `json:"byResourceKind"`
+	} `json:"resourceFilters"`
+}
+
+// ReqCreatePkg is a request body for the create pkg endpoint.
+type ReqCreatePkg struct {
+	OrgIDs    []ReqCreateOrgIDOpt `json:"orgIDs"`
+	Resources []ResourceToClone   `json:"resources"`
+}
+
+// OK validates a create request.
+func (r *ReqCreatePkg) OK() error {
+	if len(r.Resources) == 0 && len(r.OrgIDs) == 0 {
+		return &influxdb.Error{
+			Code: influxdb.EUnprocessableEntity,
+			Msg:  "at least 1 resource or 1 org id must be provided",
+		}
+	}
+
+	for _, org := range r.OrgIDs {
+		if _, err := influxdb.IDFromString(org.OrgID); err != nil {
+			return &influxdb.Error{
+				Code: influxdb.EInvalid,
+				Msg:  fmt.Sprintf("provided org id is invalid: %q", org.OrgID),
+			}
+		}
+	}
+	return nil
+}
+
+// RespCreatePkg is a response body for the create pkg endpoint.
+type RespCreatePkg []Object
 
 func (s *HTTPServer) createPkg(w http.ResponseWriter, r *http.Request) {
 	encoding := pkgEncoding(r.Header)
@@ -81,23 +189,19 @@ func (s *HTTPServer) createPkg(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	if len(reqBody.Resources) == 0 && len(reqBody.OrgIDs) == 0 {
-		s.api.Err(w, &influxdb.Error{
-			Code: influxdb.EUnprocessableEntity,
-			Msg:  "at least 1 resource or 1 org id must be provided",
-		})
-		return
-	}
-
 	opts := []CreatePkgSetFn{
 		CreateWithExistingResources(reqBody.Resources...),
 	}
 	for _, orgIDStr := range reqBody.OrgIDs {
-		orgID, err := influxdb.IDFromString(orgIDStr)
+		orgID, err := influxdb.IDFromString(orgIDStr.OrgID)
 		if err != nil {
 			continue
 		}
-		opts = append(opts, CreateWithAllOrgResources(*orgID))
+		opts = append(opts, CreateWithAllOrgResources(CreateByOrgIDOpt{
+			OrgID:         *orgID,
+			LabelNames:    orgIDStr.Filters.ByLabel,
+			ResourceKinds: orgIDStr.Filters.ByResourceKind,
+		}))
 	}
 
 	newPkg, err := s.svc.CreatePkg(r.Context(), opts...)
@@ -152,6 +256,7 @@ func (p PkgRemote) Encoding() Encoding {
 type ReqApplyPkg struct {
 	DryRun  bool              `json:"dryRun" yaml:"dryRun"`
 	OrgID   string            `json:"orgID" yaml:"orgID"`
+	StackID *string           `json:"stackID" yaml:"stackID"` // optional: non nil value signals stack should be used
 	Remotes []PkgRemote       `json:"remotes" yaml:"remotes"`
 	RawPkgs []json.RawMessage `json:"packages" yaml:"packages"`
 	RawPkg  json.RawMessage   `json:"package" yaml:"package"`
@@ -190,7 +295,7 @@ func (r ReqApplyPkg) Pkgs(encoding Encoding) (*Pkg, error) {
 		rawPkgs = append(rawPkgs, pkg)
 	}
 
-	return Combine(rawPkgs...)
+	return Combine(rawPkgs)
 }
 
 // RespApplyPkg is the response body for the apply pkg endpoint.
@@ -212,10 +317,21 @@ func (s *HTTPServer) applyPkg(w http.ResponseWriter, r *http.Request) {
 	orgID, err := influxdb.IDFromString(reqBody.OrgID)
 	if err != nil {
 		s.api.Err(w, &influxdb.Error{
-			Code: influxdb.EConflict,
+			Code: influxdb.EInvalid,
 			Msg:  fmt.Sprintf("invalid organization ID provided: %q", reqBody.OrgID),
 		})
 		return
+	}
+
+	var stackID influxdb.ID
+	if reqBody.StackID != nil {
+		if err := stackID.DecodeFromString(*reqBody.StackID); err != nil {
+			s.api.Err(w, &influxdb.Error{
+				Code: influxdb.EInvalid,
+				Msg:  fmt.Sprintf("invalid stack ID provided: %q", *reqBody.StackID),
+			})
+			return
+		}
 	}
 
 	auth, err := pctx.GetAuthorizer(r.Context())
@@ -234,7 +350,12 @@ func (s *HTTPServer) applyPkg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sum, diff, err := s.svc.DryRun(r.Context(), *orgID, userID, parsedPkg, ApplyWithEnvRefs(reqBody.EnvRefs))
+	applyOpts := []ApplyOptFn{
+		ApplyWithEnvRefs(reqBody.EnvRefs),
+		ApplyWithStackID(stackID),
+	}
+
+	sum, diff, err := s.svc.DryRun(r.Context(), *orgID, userID, parsedPkg, applyOpts...)
 	if IsParseErr(err) {
 		s.api.Respond(w, http.StatusUnprocessableEntity, RespApplyPkg{
 			Diff:    diff,
@@ -257,7 +378,9 @@ func (s *HTTPServer) applyPkg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sum, err = s.svc.Apply(r.Context(), *orgID, userID, parsedPkg, ApplyWithEnvRefs(reqBody.EnvRefs), ApplyWithSecrets(reqBody.Secrets))
+	applyOpts = append(applyOpts, ApplyWithSecrets(reqBody.Secrets))
+
+	sum, err = s.svc.Apply(r.Context(), *orgID, userID, parsedPkg, applyOpts...)
 	if err != nil && !IsParseErr(err) {
 		s.api.Err(w, err)
 		return

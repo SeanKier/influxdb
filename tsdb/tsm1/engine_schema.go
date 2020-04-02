@@ -12,6 +12,7 @@ import (
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/tsdb"
 	"github.com/influxdata/influxdb/tsdb/cursors"
+	"github.com/influxdata/influxdb/tsdb/seriesfile"
 	"github.com/influxdata/influxql"
 )
 
@@ -30,22 +31,29 @@ const cancelCheckInterval = 64
 // If the context is canceled before TagValues has finished processing, a non-nil
 // error will be returned along with a partial result of the already scanned values.
 func (e *Engine) TagValues(ctx context.Context, orgID, bucketID influxdb.ID, tagKey string, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
-	encoded := tsdb.EncodeName(orgID, bucketID)
-
 	if predicate == nil {
-		return e.tagValuesNoPredicate(ctx, encoded[:], []byte(tagKey), start, end)
+		return e.tagValuesNoPredicate(ctx, orgID, bucketID, nil, []byte(tagKey), start, end)
 	}
 
-	return e.tagValuesPredicate(ctx, encoded[:], []byte(tagKey), start, end, predicate)
+	return e.tagValuesPredicate(ctx, orgID, bucketID, nil, []byte(tagKey), start, end, predicate)
 }
 
-func (e *Engine) tagValuesNoPredicate(ctx context.Context, orgBucket, tagKeyBytes []byte, start, end int64) (cursors.StringIterator, error) {
+func (e *Engine) tagValuesNoPredicate(ctx context.Context, orgID, bucketID influxdb.ID, measurement, tagKeyBytes []byte, start, end int64) (cursors.StringIterator, error) {
 	tsmValues := make(map[string]struct{})
 	var tags models.Tags
 
+	orgBucket := tsdb.EncodeName(orgID, bucketID)
+
 	// TODO(edd): we need to clean up how we're encoding the prefix so that we
 	// don't have to remember to get it right everywhere we need to touch TSM data.
-	prefix := models.EscapeMeasurement(orgBucket)
+	orgBucketEsc := models.EscapeMeasurement(orgBucket[:])
+
+	tsmKeyPrefix := orgBucketEsc
+	if len(measurement) > 0 {
+		// append the measurement tag key to the prefix
+		mt := models.Tags{models.NewTag(models.MeasurementTagKeyBytes, measurement)}
+		tsmKeyPrefix = mt.AppendHashKey(tsmKeyPrefix)
+	}
 
 	// TODO(sgc): extend prefix when filtering by \x00 == <measurement>
 
@@ -60,13 +68,13 @@ func (e *Engine) tagValuesNoPredicate(ctx context.Context, orgBucket, tagKeyByte
 			return false
 		default:
 		}
-		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(prefix, prefix) {
+		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(tsmKeyPrefix, tsmKeyPrefix) {
 			// TODO(sgc): create f.TimeRangeIterator(minKey, maxKey, start, end)
-			iter := f.TimeRangeIterator(prefix, start, end)
+			iter := f.TimeRangeIterator(tsmKeyPrefix, start, end)
 			for i := 0; iter.Next(); i++ {
 				sfkey := iter.Key()
-				if !bytes.HasPrefix(sfkey, prefix) {
-					// end of org+bucket
+				if !bytes.HasPrefix(sfkey, tsmKeyPrefix) {
+					// end of prefix
 					break
 				}
 
@@ -96,9 +104,9 @@ func (e *Engine) tagValuesNoPredicate(ctx context.Context, orgBucket, tagKeyByte
 
 	// With performance in mind, we explicitly do not check the context
 	// while scanning the entries in the cache.
-	prefixStr := string(prefix)
+	tsmKeyprefixStr := string(tsmKeyPrefix)
 	_ = e.Cache.ApplyEntryFn(func(sfkey string, entry *entry) error {
-		if !strings.HasPrefix(sfkey, prefixStr) {
+		if !strings.HasPrefix(sfkey, tsmKeyprefixStr) {
 			return nil
 		}
 
@@ -132,12 +140,14 @@ func (e *Engine) tagValuesNoPredicate(ctx context.Context, orgBucket, tagKeyByte
 	return cursors.NewStringSliceIteratorWithStats(vals, stats), nil
 }
 
-func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes []byte, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
+func (e *Engine) tagValuesPredicate(ctx context.Context, orgID, bucketID influxdb.ID, measurement, tagKeyBytes []byte, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
 	if err := ValidateTagPredicate(predicate); err != nil {
 		return nil, err
 	}
 
-	keys, err := e.findCandidateKeys(ctx, orgBucket, predicate)
+	orgBucket := tsdb.EncodeName(orgID, bucketID)
+
+	keys, err := e.findCandidateKeys(ctx, orgBucket[:], predicate)
 	if err != nil {
 		return cursors.EmptyStringIterator, err
 	}
@@ -156,7 +166,15 @@ func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes 
 
 	// TODO(edd): we need to clean up how we're encoding the prefix so that we
 	// don't have to remember to get it right everywhere we need to touch TSM data.
-	prefix := models.EscapeMeasurement(orgBucket)
+	orgBucketEsc := models.EscapeMeasurement(orgBucket[:])
+
+	tsmKeyPrefix := orgBucketEsc
+	if len(measurement) > 0 {
+		// append the measurement tag key to the prefix
+		mt := models.Tags{models.NewTag(models.MeasurementTagKeyBytes, measurement)}
+		tsmKeyPrefix = mt.AppendHashKey(tsmKeyPrefix)
+	}
+
 	var canceled bool
 
 	e.FileStore.ForEachFile(func(f TSMFile) bool {
@@ -167,10 +185,10 @@ func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes 
 			return false
 		default:
 		}
-		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(prefix, prefix) {
+		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(tsmKeyPrefix, tsmKeyPrefix) {
 			f.Ref()
 			files = append(files, f)
-			iters = append(iters, f.TimeRangeIterator(prefix, start, end))
+			iters = append(iters, f.TimeRangeIterator(tsmKeyPrefix, start, end))
 		}
 		return true
 	})
@@ -202,7 +220,7 @@ func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes 
 			}
 		}
 
-		_, tags = tsdb.ParseSeriesKeyInto(keys[i], tags[:0])
+		_, tags = seriesfile.ParseSeriesKeyInto(keys[i], tags[:0])
 		curVal := tags.Get(tagKeyBytes)
 		if len(curVal) == 0 {
 			continue
@@ -212,7 +230,7 @@ func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes 
 			continue
 		}
 
-		keybuf = models.AppendMakeKey(keybuf[:0], prefix, tags)
+		keybuf = models.AppendMakeKey(keybuf[:0], orgBucketEsc, tags)
 		sfkey = AppendSeriesFieldKeyBytes(sfkey[:0], keybuf, tags.Get(models.FieldKeyTagKeyBytes))
 
 		values := e.Cache.Values(sfkey)
@@ -225,7 +243,6 @@ func (e *Engine) tagValuesPredicate(ctx context.Context, orgBucket, tagKeyBytes 
 		}
 
 		for _, iter := range iters {
-
 			if exact, _ := iter.Seek(sfkey); !exact {
 				continue
 			}
@@ -294,21 +311,28 @@ func (e *Engine) findCandidateKeys(ctx context.Context, orgBucket []byte, predic
 // If the context is canceled before TagKeys has finished processing, a non-nil
 // error will be returned along with a partial result of the already scanned keys.
 func (e *Engine) TagKeys(ctx context.Context, orgID, bucketID influxdb.ID, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
-	encoded := tsdb.EncodeName(orgID, bucketID)
-
 	if predicate == nil {
-		return e.tagKeysNoPredicate(ctx, encoded[:], start, end)
+		return e.tagKeysNoPredicate(ctx, orgID, bucketID, nil, start, end)
 	}
 
-	return e.tagKeysPredicate(ctx, encoded[:], start, end, predicate)
+	return e.tagKeysPredicate(ctx, orgID, bucketID, nil, start, end, predicate)
 }
 
-func (e *Engine) tagKeysNoPredicate(ctx context.Context, orgBucket []byte, start, end int64) (cursors.StringIterator, error) {
+func (e *Engine) tagKeysNoPredicate(ctx context.Context, orgID, bucketID influxdb.ID, measurement []byte, start, end int64) (cursors.StringIterator, error) {
 	var tags models.Tags
+
+	orgBucket := tsdb.EncodeName(orgID, bucketID)
 
 	// TODO(edd): we need to clean up how we're encoding the prefix so that we
 	// don't have to remember to get it right everywhere we need to touch TSM data.
-	prefix := models.EscapeMeasurement(orgBucket)
+	orgBucketEsc := models.EscapeMeasurement(orgBucket[:])
+
+	tsmKeyPrefix := orgBucketEsc
+	if len(measurement) > 0 {
+		// append the measurement tag key to the prefix
+		mt := models.Tags{models.NewTag(models.MeasurementTagKeyBytes, measurement)}
+		tsmKeyPrefix = mt.AppendHashKey(tsmKeyPrefix)
+	}
 
 	var keyset models.TagKeysSet
 
@@ -325,13 +349,13 @@ func (e *Engine) tagKeysNoPredicate(ctx context.Context, orgBucket []byte, start
 			return false
 		default:
 		}
-		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(prefix, prefix) {
+		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(tsmKeyPrefix, tsmKeyPrefix) {
 			// TODO(sgc): create f.TimeRangeIterator(minKey, maxKey, start, end)
-			iter := f.TimeRangeIterator(prefix, start, end)
+			iter := f.TimeRangeIterator(tsmKeyPrefix, start, end)
 			for i := 0; iter.Next(); i++ {
 				sfkey := iter.Key()
-				if !bytes.HasPrefix(sfkey, prefix) {
-					// end of org+bucket
+				if !bytes.HasPrefix(sfkey, tsmKeyPrefix) {
+					// end of prefix
 					break
 				}
 
@@ -356,8 +380,9 @@ func (e *Engine) tagKeysNoPredicate(ctx context.Context, orgBucket []byte, start
 
 	// With performance in mind, we explicitly do not check the context
 	// while scanning the entries in the cache.
+	tsmKeyprefixStr := string(tsmKeyPrefix)
 	_ = e.Cache.ApplyEntryFn(func(sfkey string, entry *entry) error {
-		if !strings.HasPrefix(sfkey, string(prefix)) {
+		if !strings.HasPrefix(sfkey, tsmKeyprefixStr) {
 			return nil
 		}
 
@@ -380,12 +405,14 @@ func (e *Engine) tagKeysNoPredicate(ctx context.Context, orgBucket []byte, start
 	return cursors.NewStringSliceIteratorWithStats(keyset.Keys(), stats), nil
 }
 
-func (e *Engine) tagKeysPredicate(ctx context.Context, orgBucket []byte, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
+func (e *Engine) tagKeysPredicate(ctx context.Context, orgID, bucketID influxdb.ID, measurement []byte, start, end int64, predicate influxql.Expr) (cursors.StringIterator, error) {
 	if err := ValidateTagPredicate(predicate); err != nil {
 		return nil, err
 	}
 
-	keys, err := e.findCandidateKeys(ctx, orgBucket, predicate)
+	orgBucket := tsdb.EncodeName(orgID, bucketID)
+
+	keys, err := e.findCandidateKeys(ctx, orgBucket[:], predicate)
 	if err != nil {
 		return cursors.EmptyStringIterator, err
 	}
@@ -404,7 +431,15 @@ func (e *Engine) tagKeysPredicate(ctx context.Context, orgBucket []byte, start, 
 
 	// TODO(edd): we need to clean up how we're encoding the prefix so that we
 	// don't have to remember to get it right everywhere we need to touch TSM data.
-	prefix := models.EscapeMeasurement(orgBucket)
+	orgBucketEsc := models.EscapeMeasurement(orgBucket[:])
+
+	tsmKeyPrefix := orgBucketEsc
+	if len(measurement) > 0 {
+		// append the measurement tag key to the prefix
+		mt := models.Tags{models.NewTag(models.MeasurementTagKeyBytes, measurement)}
+		tsmKeyPrefix = mt.AppendHashKey(tsmKeyPrefix)
+	}
+
 	var canceled bool
 
 	e.FileStore.ForEachFile(func(f TSMFile) bool {
@@ -415,10 +450,10 @@ func (e *Engine) tagKeysPredicate(ctx context.Context, orgBucket []byte, start, 
 			return false
 		default:
 		}
-		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(prefix, prefix) {
+		if f.OverlapsTimeRange(start, end) && f.OverlapsKeyPrefixRange(tsmKeyPrefix, tsmKeyPrefix) {
 			f.Ref()
 			files = append(files, f)
-			iters = append(iters, f.TimeRangeIterator(prefix, start, end))
+			iters = append(iters, f.TimeRangeIterator(tsmKeyPrefix, start, end))
 		}
 		return true
 	})
@@ -450,12 +485,12 @@ func (e *Engine) tagKeysPredicate(ctx context.Context, orgBucket []byte, start, 
 			}
 		}
 
-		_, tags = tsdb.ParseSeriesKeyInto(keys[i], tags[:0])
+		_, tags = seriesfile.ParseSeriesKeyInto(keys[i], tags[:0])
 		if keyset.IsSupersetKeys(tags) {
 			continue
 		}
 
-		keybuf = models.AppendMakeKey(keybuf[:0], prefix, tags)
+		keybuf = models.AppendMakeKey(keybuf[:0], orgBucketEsc, tags)
 		sfkey = AppendSeriesFieldKeyBytes(sfkey[:0], keybuf, tags.Get(models.FieldKeyTagKeyBytes))
 
 		values := e.Cache.Values(sfkey)
@@ -468,7 +503,6 @@ func (e *Engine) tagKeysPredicate(ctx context.Context, orgBucket []byte, start, 
 		}
 
 		for _, iter := range iters {
-
 			if exact, _ := iter.Seek(sfkey); !exact {
 				continue
 			}
@@ -518,6 +552,7 @@ func ValidateTagPredicate(expr influxql.Expr) (err error) {
 			case *influxql.StringLiteral:
 			case *influxql.RegexLiteral:
 			case *influxql.BinaryExpr:
+			case *influxql.ParenExpr:
 			default:
 				err = fmt.Errorf("binary expression: RHS must be string or regex, got: %T", r)
 			}

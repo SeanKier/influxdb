@@ -6,19 +6,14 @@ import {withRouter, WithRouterProps} from 'react-router'
 // Components
 import AutoRefreshDropdown from 'src/shared/components/dropdown_auto_refresh/AutoRefreshDropdown'
 import TimeRangeDropdown from 'src/shared/components/TimeRangeDropdown'
+import PresentationModeToggle from 'src/shared/components/PresentationModeToggle'
+import DashboardLightModeToggle from 'src/dashboards/components/DashboardLightModeToggle'
 import GraphTips from 'src/shared/components/graph_tips/GraphTips'
 import RenamablePageTitle from 'src/pageLayout/components/RenamablePageTitle'
 import TimeZoneDropdown from 'src/shared/components/TimeZoneDropdown'
-import {
-  SquareButton,
-  Button,
-  IconFont,
-  ComponentColor,
-  Page,
-} from '@influxdata/clockface'
+import {Button, IconFont, ComponentColor, Page} from '@influxdata/clockface'
 
 // Actions
-import {delayEnablePresentationMode} from 'src/shared/actions/app'
 import {toggleShowVariablesControls} from 'src/userSettings/actions'
 import {updateDashboard} from 'src/dashboards/actions/thunks'
 import {
@@ -31,7 +26,7 @@ import {
 } from 'src/dashboards/actions/ranges'
 
 // Selectors
-import {getTimeRangeByDashboardID} from 'src/dashboards/selectors'
+import {getTimeRange} from 'src/dashboards/selectors'
 import {getByID} from 'src/resources/selectors'
 import {getOrg} from 'src/organizations/selectors'
 
@@ -65,7 +60,6 @@ interface StateProps {
 }
 
 interface DispatchProps {
-  handleClickPresentationButton: typeof delayEnablePresentationMode
   toggleShowVariablesControls: typeof toggleShowVariablesControls
   updateDashboard: typeof updateDashboard
   onSetAutoRefreshStatus: typeof setAutoRefreshStatus
@@ -79,7 +73,6 @@ type Props = OwnProps & StateProps & DispatchProps & WithRouterProps
 class DashboardHeader extends Component<Props> {
   public render() {
     const {
-      org,
       dashboard,
       onManualRefresh,
       toggleShowVariablesControls,
@@ -89,57 +82,57 @@ class DashboardHeader extends Component<Props> {
     } = this.props
 
     return (
-      <Page.Header fullWidth={true}>
-        <Page.HeaderLeft>
+      <>
+        <Page.Header fullWidth={true}>
           <RenamablePageTitle
-            prefix={org && org.name}
             maxLength={DASHBOARD_NAME_MAX_LENGTH}
             onRename={this.handleRenameDashboard}
             name={dashboard && dashboard.name}
             placeholder={DEFAULT_DASHBOARD_NAME}
           />
-        </Page.HeaderLeft>
-        <Page.HeaderRight>
-          <GraphTips />
-          <Button
-            icon={IconFont.AddCell}
-            color={ComponentColor.Primary}
-            onClick={this.handleAddCell}
-            text="Add Cell"
-            titleText="Add cell to dashboard"
-          />
-          <Button
-            icon={IconFont.TextBlock}
-            text="Add Note"
-            onClick={this.handleAddNote}
-          />
-          <TimeZoneDropdown />
-          <AutoRefreshDropdown
-            onChoose={this.handleChooseAutoRefresh}
-            onManualRefresh={onManualRefresh}
-            selected={autoRefresh}
-          />
-          <TimeRangeDropdown
-            onSetTimeRange={this.handleChooseTimeRange}
-            timeRange={timeRange}
-          />
-          <Button
-            icon={IconFont.Cube}
-            text="Variables"
-            onClick={toggleShowVariablesControls}
-            color={
-              showVariablesControls
-                ? ComponentColor.Secondary
-                : ComponentColor.Default
-            }
-          />
-          <SquareButton
-            icon={IconFont.ExpandA}
-            titleText="Enter Presentation Mode"
-            onClick={this.handleClickPresentationButton}
-          />
-        </Page.HeaderRight>
-      </Page.Header>
+        </Page.Header>
+        <Page.ControlBar fullWidth={true}>
+          <Page.ControlBarLeft>
+            <Button
+              icon={IconFont.AddCell}
+              color={ComponentColor.Primary}
+              onClick={this.handleAddCell}
+              text="Add Cell"
+              titleText="Add cell to dashboard"
+            />
+            <Button
+              icon={IconFont.TextBlock}
+              text="Add Note"
+              onClick={this.handleAddNote}
+            />
+            <Button
+              icon={IconFont.Cube}
+              text="Variables"
+              onClick={toggleShowVariablesControls}
+              color={
+                showVariablesControls
+                  ? ComponentColor.Secondary
+                  : ComponentColor.Default
+              }
+            />
+            <DashboardLightModeToggle />
+            <PresentationModeToggle />
+            <GraphTips />
+          </Page.ControlBarLeft>
+          <Page.ControlBarRight>
+            <TimeZoneDropdown />
+            <AutoRefreshDropdown
+              onChoose={this.handleChooseAutoRefresh}
+              onManualRefresh={onManualRefresh}
+              selected={autoRefresh}
+            />
+            <TimeRangeDropdown
+              onSetTimeRange={this.handleChooseTimeRange}
+              timeRange={timeRange}
+            />
+          </Page.ControlBarRight>
+        </Page.ControlBar>
+      </>
     )
   }
 
@@ -157,10 +150,6 @@ class DashboardHeader extends Component<Props> {
     const {dashboard, updateDashboard} = this.props
 
     updateDashboard(dashboard.id, {name})
-  }
-
-  private handleClickPresentationButton = (): void => {
-    this.props.handleClickPresentationButton()
   }
 
   private handleChooseAutoRefresh = (milliseconds: number) => {
@@ -218,7 +207,7 @@ const mstp = (state: AppState): StateProps => {
     state.currentDashboard.id
   )
 
-  const timeRange = getTimeRangeByDashboardID(state, state.currentDashboard.id)
+  const timeRange = getTimeRange(state, state.currentDashboard.id)
   const org = getOrg(state)
 
   return {
@@ -232,7 +221,6 @@ const mstp = (state: AppState): StateProps => {
 const mdtp: DispatchProps = {
   toggleShowVariablesControls: toggleShowVariablesControls,
   updateDashboard: updateDashboard,
-  handleClickPresentationButton: delayEnablePresentationMode,
   onSetAutoRefreshStatus: setAutoRefreshStatus,
   updateQueryParams: updateQueryParams,
   setDashboardTimeRange: setDashboardTimeRange,

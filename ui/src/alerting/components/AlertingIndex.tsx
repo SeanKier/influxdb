@@ -4,13 +4,13 @@ import {connect} from 'react-redux'
 
 //Components
 import {Grid, GridRow, GridColumn, Page} from '@influxdata/clockface'
-import PageTitleWithOrg from 'src/shared/components/PageTitleWithOrg'
 import ChecksColumn from 'src/checks/components/ChecksColumn'
 import RulesColumn from 'src/notifications/rules/components/RulesColumn'
 import EndpointsColumn from 'src/notifications/endpoints/components/EndpointsColumn'
 import GetAssetLimits from 'src/cloud/components/GetAssetLimits'
 import AssetLimitAlert from 'src/cloud/components/AssetLimitAlert'
 import GetResources from 'src/resources/components/GetResources'
+import CloudUpgradeButton from 'src/shared/components/CloudUpgradeButton'
 
 // Utils
 import {pageTitleSuffixer} from 'src/shared/utils/pageTitles'
@@ -35,12 +35,10 @@ const AlertingIndex: FunctionComponent<StateProps> = ({
 }) => {
   return (
     <>
-      <Page titleTag={pageTitleSuffixer(['Monitoring & Alerting'])}>
+      <Page titleTag={pageTitleSuffixer(['Alerts'])}>
         <Page.Header fullWidth={false}>
-          <Page.HeaderLeft>
-            <PageTitleWithOrg title="Monitoring & Alerting" />
-          </Page.HeaderLeft>
-          <Page.HeaderRight />
+          <Page.Title title="Alerts" />
+          <CloudUpgradeButton />
         </Page.Header>
         <Page.Contents fullWidth={false} scrollable={false}>
           <GetResources resources={[ResourceType.Labels]}>

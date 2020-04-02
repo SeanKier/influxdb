@@ -4359,6 +4359,64 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /packages/stacks:
+    post:
+      operationId: CreatePkg
+      tags:
+        - InfluxPackages
+      summary: Create a new Influx package
+      requestBody:
+        description: Influx package to create.
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgID:
+                  type: string
+                name:
+                  type: string
+                description:
+                  type: string
+                urls:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Influx stack created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  orgID:
+                    type: string
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  urls:
+                    type: array
+                    items:
+                      type: string
+                  createdAt:
+                    type: string
+                    format: date-time
+                    readOnly: true
+                  updatedAt:
+                    type: string
+                    format: date-time
+                    readOnly: true
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /tasks:
     get:
       operationId: GetTasks
@@ -7151,6 +7209,8 @@ components:
           type: boolean
         orgID:
           type: string
+        stackID:
+          type: string
         package:
           $ref: "#/components/schemas/Pkg"
         packages:
@@ -7171,30 +7231,46 @@ components:
               contentType:
                 type: string
             required: ["url"]
+    PkgCreateKind:
+      type: string
+      enum:
+        - bucket
+        - check
+        - dashboard
+        - label
+        - notification_endpoint
+        - notification_rule
+        - task
+        - telegraf
+        - variable
     PkgCreate:
       type: object
       properties:
         orgIDs:
           type: array
           items:
-            type: string
+            type: object
+            properties:
+              orgID:
+                type: string
+              resourceFilters:
+                type: object
+                properties:
+                  byLabel:
+                    type: array
+                    items:
+                      type: string
+                  byResourceKind:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PkgCreateKind"
         resources:
           type: object
           properties:
             id:
               type: string
             kind:
-              type: string
-              enum:
-                - bucket
-                - check
-                - dashboard
-                - label
-                - notification_endpoint
-                - notification_rule
-                - task
-                - telegraf
-                - variable
+              $ref: "#/components/schemas/PkgCreateKind"
             name:
               type: string
           required: [id, kind]
@@ -7217,7 +7293,6 @@ components:
               - NotificationEndpointPagerDuty
               - NotificationEndpointSlack
               - NotificationRule
-              - NotificationEndpointHTTP
               - Task
               - Telegraf
               - Variable
@@ -7242,6 +7317,8 @@ components:
                   id:
                     type: string
                   orgID:
+                    type: string
+                  pkgName:
                     type: string
                   name:
                     type: string
@@ -7431,11 +7508,13 @@ components:
                 properties:
                   id:
                     type: string
-                  name:
+                  pkgName:
                     type: string
                   new:
                     type: object
                     properties:
+                      name:
+                        type: string
                       description:
                         type: string
                       retentionRules:
@@ -7443,6 +7522,8 @@ components:
                   old:
                     type: object
                     properties:
+                      name:
+                        type: string
                       description:
                         type: string
                       retentionRules:
@@ -7480,11 +7561,13 @@ components:
                 properties:
                   id:
                     type: string
-                  name:
+                  pkgName:
                     type: string
                   new:
                     type: object
                     properties:
+                      name:
+                        type: string
                       color:
                         type: string
                       description:
@@ -7492,6 +7575,8 @@ components:
                   old:
                     type: object
                     properties:
+                      name:
+                        type: string
                       color:
                         type: string
                       description:
@@ -7638,6 +7723,8 @@ components:
         id:
           type: string
         orgID:
+          type: string
+        pkgName:
           type: string
         name:
           type: string

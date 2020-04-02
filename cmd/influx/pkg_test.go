@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -35,10 +36,19 @@ func TestCmdPkg(t *testing.T) {
 	}
 
 	t.Run("export all", func(t *testing.T) {
+		defaultAssertFn := func(t *testing.T, pkg *pkger.Pkg) {
+			t.Helper()
+			sum := pkg.Summary()
+
+			require.Len(t, sum.Buckets, 1)
+			assert.Equal(t, "bucket1", sum.Buckets[0].Name)
+		}
+
 		expectedOrgID := influxdb.ID(9000)
 
 		tests := []struct {
 			pkgFileArgs
+			assertFn func(t *testing.T, pkg *pkger.Pkg)
 		}{
 			{
 				pkgFileArgs: pkgFileArgs{
@@ -72,6 +82,106 @@ func TestCmdPkg(t *testing.T) {
 					envVars:  map[string]string{"INFLUX_ORG_ID": expectedOrgID.String()},
 				},
 			},
+			{
+				pkgFileArgs: pkgFileArgs{
+					name:     "with labelName filter",
+					encoding: pkger.EncodingYAML,
+					filename: "pkg_0.yml",
+					args: []string{
+						"--org-id=" + expectedOrgID.String(),
+						"--filter=labelName=foo",
+					},
+				},
+				assertFn: func(t *testing.T, pkg *pkger.Pkg) {
+					defaultAssertFn(t, pkg)
+
+					sum := pkg.Summary()
+
+					require.Len(t, sum.Labels, 1)
+					assert.Equal(t, "foo", sum.Labels[0].Name)
+				},
+			},
+			{
+				pkgFileArgs: pkgFileArgs{
+					name:     "with multiple labelName filters",
+					encoding: pkger.EncodingYAML,
+					filename: "pkg_0.yml",
+					args: []string{
+						"--org-id=" + expectedOrgID.String(),
+						"--filter=labelName=foo",
+						"--filter=labelName=bar",
+					},
+				},
+				assertFn: func(t *testing.T, pkg *pkger.Pkg) {
+					defaultAssertFn(t, pkg)
+
+					sum := pkg.Summary()
+
+					require.Len(t, sum.Labels, 2)
+					assert.Equal(t, "bar", sum.Labels[0].Name)
+					assert.Equal(t, "foo", sum.Labels[1].Name)
+				},
+			},
+			{
+				pkgFileArgs: pkgFileArgs{
+					name:     "with resourceKind filter",
+					encoding: pkger.EncodingYAML,
+					filename: "pkg_0.yml",
+					args: []string{
+						"--org-id=" + expectedOrgID.String(),
+						"--filter=resourceKind=Dashboard",
+					},
+				},
+				assertFn: func(t *testing.T, pkg *pkger.Pkg) {
+					sum := pkg.Summary()
+
+					require.Len(t, sum.Dashboards, 1)
+					assert.Equal(t, "Dashboard", sum.Dashboards[0].Name)
+				},
+			},
+			{
+				pkgFileArgs: pkgFileArgs{
+					name:     "with multiple resourceKind filter",
+					encoding: pkger.EncodingYAML,
+					filename: "pkg_0.yml",
+					args: []string{
+						"--org-id=" + expectedOrgID.String(),
+						"--filter=resourceKind=Dashboard",
+						"--filter=resourceKind=Bucket",
+					},
+				},
+				assertFn: func(t *testing.T, pkg *pkger.Pkg) {
+					sum := pkg.Summary()
+
+					require.Len(t, sum.Buckets, 1)
+					assert.Equal(t, "Bucket", sum.Buckets[0].Name)
+					require.Len(t, sum.Dashboards, 1)
+					assert.Equal(t, "Dashboard", sum.Dashboards[0].Name)
+				},
+			},
+			{
+				pkgFileArgs: pkgFileArgs{
+					name:     "with mixed resourceKind and labelName filters",
+					encoding: pkger.EncodingYAML,
+					filename: "pkg_0.yml",
+					args: []string{
+						"--org-id=" + expectedOrgID.String(),
+						"--filter=labelName=foo",
+						"--filter=resourceKind=Dashboard",
+						"--filter=resourceKind=Bucket",
+					},
+				},
+				assertFn: func(t *testing.T, pkg *pkger.Pkg) {
+					sum := pkg.Summary()
+
+					require.Len(t, sum.Labels, 1)
+					assert.Equal(t, "foo", sum.Labels[0].Name)
+					require.Len(t, sum.Buckets, 1)
+					assert.Equal(t, "Bucket", sum.Buckets[0].Name)
+					require.Len(t, sum.Dashboards, 1)
+					assert.Equal(t, "Dashboard", sum.Dashboards[0].Name)
+				},
+			},
 		}
 
 		cmdFn := func(_ *globalFlags, opt genericCLIOpts) *cobra.Command {
@@ -83,14 +193,37 @@ func TestCmdPkg(t *testing.T) {
 							return nil, err
 						}
 					}
-					if !opt.OrgIDs[expectedOrgID] {
+
+					orgIDOpt := opt.OrgIDs[0]
+					if orgIDOpt.OrgID != expectedOrgID {
 						return nil, errors.New("did not provide expected orgID")
 					}
 
 					var pkg pkger.Pkg
+					for _, labelName := range orgIDOpt.LabelNames {
+						pkg.Objects = append(pkg.Objects, pkger.Object{
+							APIVersion: pkger.APIVersion,
+							Kind:       pkger.KindLabel,
+							Metadata:   pkger.Resource{"name": labelName},
+						})
+					}
+					if len(orgIDOpt.ResourceKinds) > 0 {
+						for _, k := range orgIDOpt.ResourceKinds {
+							pkg.Objects = append(pkg.Objects, pkger.Object{
+								APIVersion: pkger.APIVersion,
+								Kind:       k,
+								Metadata: pkger.Resource{
+									"name": k.String(),
+								},
+							})
+						}
+						// return early so we don't get the default bucket
+						return &pkg, nil
+					}
+
 					pkg.Objects = append(pkg.Objects, pkger.Object{
 						APIVersion: pkger.APIVersion,
-						Type:       pkger.KindBucket,
+						Kind:       pkger.KindBucket,
 						Metadata:   pkger.Resource{"name": "bucket1"},
 					})
 					return &pkg, nil
@@ -98,14 +231,14 @@ func TestCmdPkg(t *testing.T) {
 			}
 			return newCmdPkgBuilder(fakeSVCFn(pkgSVC), opt).cmd()
 		}
+
 		for _, tt := range tests {
 			tt.pkgFileArgs.args = append([]string{"pkg", "export", "all"}, tt.pkgFileArgs.args...)
-			testPkgWrites(t, cmdFn, tt.pkgFileArgs, func(t *testing.T, pkg *pkger.Pkg) {
-				sum := pkg.Summary()
-
-				require.Len(t, sum.Buckets, 1)
-				assert.Equal(t, "bucket1", sum.Buckets[0].Name)
-			})
+			assertFn := defaultAssertFn
+			if tt.assertFn != nil {
+				assertFn = tt.assertFn
+			}
+			testPkgWrites(t, cmdFn, tt.pkgFileArgs, assertFn)
 		}
 	})
 
@@ -206,7 +339,7 @@ func TestCmdPkg(t *testing.T) {
 						name := rc.Kind.String() + strconv.Itoa(int(rc.ID))
 						pkg.Objects = append(pkg.Objects, pkger.Object{
 							APIVersion: pkger.APIVersion,
-							Type:       rc.Kind,
+							Kind:       rc.Kind,
 							Metadata:   pkger.Resource{"name": name},
 						})
 					}
@@ -313,6 +446,122 @@ func TestCmdPkg(t *testing.T) {
 			cmd.SetArgs([]string{"pkg", "validate"})
 
 			require.Error(t, cmd.Execute())
+		})
+	})
+
+	t.Run("stack", func(t *testing.T) {
+		t.Run("init", func(t *testing.T) {
+			tests := []struct {
+				name          string
+				args          []string
+				envVars       map[string]string
+				expectedStack pkger.Stack
+				shouldErr     bool
+			}{
+				{
+					name: "when only org and token provided is successful",
+					args: []string{"--org-id=" + influxdb.ID(1).String()},
+					expectedStack: pkger.Stack{
+						OrgID: 1,
+					},
+				},
+				{
+					name: "when org and name provided provided is successful",
+					args: []string{
+						"--org-id=" + influxdb.ID(1).String(),
+						"--stack-name=foo",
+					},
+					expectedStack: pkger.Stack{
+						OrgID: 1,
+						Name:  "foo",
+					},
+				},
+				{
+					name: "when all flags provided provided is successful",
+					args: []string{
+						"--org-id=" + influxdb.ID(1).String(),
+						"--stack-name=foo",
+						"--stack-description=desc",
+						"--package-url=http://example.com/1",
+						"--package-url=http://example.com/2",
+					},
+					expectedStack: pkger.Stack{
+						OrgID:       1,
+						Name:        "foo",
+						Description: "desc",
+						URLs: []string{
+							"http://example.com/1",
+							"http://example.com/2",
+						},
+					},
+				},
+				{
+					name: "when all shorthand flags provided provided is successful",
+					args: []string{
+						"--org-id=" + influxdb.ID(1).String(),
+						"-n=foo",
+						"-d=desc",
+						"-u=http://example.com/1",
+						"-u=http://example.com/2",
+					},
+					expectedStack: pkger.Stack{
+						OrgID:       1,
+						Name:        "foo",
+						Description: "desc",
+						URLs: []string{
+							"http://example.com/1",
+							"http://example.com/2",
+						},
+					},
+				},
+			}
+
+			for _, tt := range tests {
+				fn := func(t *testing.T) {
+					defer addEnvVars(t, envVarsZeroMap)()
+
+					outBuf := new(bytes.Buffer)
+					defer func() {
+						if t.Failed() && outBuf.Len() > 0 {
+							t.Log(outBuf.String())
+						}
+					}()
+
+					builder := newInfluxCmdBuilder(
+						in(new(bytes.Buffer)),
+						out(outBuf),
+					)
+
+					rootCmd := builder.cmd(func(f *globalFlags, opt genericCLIOpts) *cobra.Command {
+						echoSVC := &fakePkgSVC{
+							initStackFn: func(ctx context.Context, userID influxdb.ID, stack pkger.Stack) (pkger.Stack, error) {
+								stack.ID = 9000
+								return stack, nil
+							},
+						}
+						return newCmdPkgBuilder(fakeSVCFn(echoSVC), opt).cmd()
+					})
+
+					baseArgs := []string{"pkg", "stack", "init", "--json"}
+
+					rootCmd.SetArgs(append(baseArgs, tt.args...))
+
+					err := rootCmd.Execute()
+					if tt.shouldErr {
+						require.Error(t, err)
+					} else {
+						require.NoError(t, err)
+						var stack pkger.Stack
+						testDecodeJSONBody(t, outBuf, &stack)
+						if tt.expectedStack.ID == 0 {
+							tt.expectedStack.ID = 9000
+						}
+						assert.Equal(t, tt.expectedStack, stack)
+					}
+				}
+
+				t.Run(tt.name, fn)
+			}
 		})
 	})
 }
@@ -454,9 +703,17 @@ func testPkgWritesToBuffer(newCmdFn func(w io.Writer) *cobra.Command, args pkgFi
 }
 
 type fakePkgSVC struct {
-	createFn func(ctx context.Context, setters ...pkger.CreatePkgSetFn) (*pkger.Pkg, error)
-	dryRunFn func(ctx context.Context, orgID, userID influxdb.ID, pkg *pkger.Pkg) (pkger.Summary, pkger.Diff, error)
-	applyFn  func(ctx context.Context, orgID, userID influxdb.ID, pkg *pkger.Pkg, opts ...pkger.ApplyOptFn) (pkger.Summary, error)
+	initStackFn func(ctx context.Context, userID influxdb.ID, stack pkger.Stack) (pkger.Stack, error)
+	createFn    func(ctx context.Context, setters ...pkger.CreatePkgSetFn) (*pkger.Pkg, error)
+	dryRunFn    func(ctx context.Context, orgID, userID influxdb.ID, pkg *pkger.Pkg) (pkger.Summary, pkger.Diff, error)
+	applyFn     func(ctx context.Context, orgID, userID influxdb.ID, pkg *pkger.Pkg, opts ...pkger.ApplyOptFn) (pkger.Summary, error)
+}
+
+func (f *fakePkgSVC) InitStack(ctx context.Context, userID influxdb.ID, stack pkger.Stack) (pkger.Stack, error) {
+	if f.initStackFn != nil {
+		return f.initStackFn(ctx, userID, stack)
+	}
+	panic("not implemented")
 }
 
 func (f *fakePkgSVC) CreatePkg(ctx context.Context, setters ...pkger.CreatePkgSetFn) (*pkger.Pkg, error) {
@@ -502,4 +759,11 @@ func idsStr(ids ...influxdb.ID) string {
 		idStrs = append(idStrs, id.String())
 	}
 	return strings.Join(idStrs, ",")
+}
+
+func testDecodeJSONBody(t *testing.T, r io.Reader, v interface{}) {
+	t.Helper()
+
+	err := json.NewDecoder(r).Decode(v)
+	require.NoError(t, err)
 }

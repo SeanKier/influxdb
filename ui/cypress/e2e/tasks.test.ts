@@ -77,8 +77,8 @@ http.post(
   })
 
   it('keeps user input in text area when attempting to import invalid JSON', () => {
-    cy.getByTestID('page-header').within(() => {
-      cy.contains('Create').click()
+    cy.getByTestID('page-control-bar').within(() => {
+      cy.getByTestID('add-resource-dropdown--button').click()
     })
 
     cy.getByTestID('add-resource-dropdown--import').click()
@@ -326,6 +326,7 @@ http.post(
         .click()
       // verify that it is the correct data
       cy.getByInputValue(secondTask)
+
       cy.get('div.cf-nav--item.active').click()
       // navigate back to the first one to verify that the name is correct
       cy.getByTestID('task-card--name')
